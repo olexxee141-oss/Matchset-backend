@@ -13,7 +13,7 @@ All routes are prefixed with `/api` and preserve the existing MatchSet frontend 
 ## Communities
 - `POST /api/communities` body `{ name, creatorName }` → `{ community, member, ownerToken }`.
 - `GET /api/communities/:slug` → `{ community, members, matches, leaderboard }`.
-- `POST /api/communities/:slug/members` body `{ name }` → `{ member }`.
+- `POST /api/communities/:slug/members` body `{ name, ownerToken }` → `{ member }`. Only the community creator's owner token is accepted.
 - `POST /api/communities/:slug/matches` body `{ title, memberIds, playersPerTeam, createdByMemberId, ownerToken }` → `{ match, resultToken }`.
 - `POST /api/communities/:slug/matches/:matchId/result` body `{ resultToken, winningTeamId }` → `{ match }`.
 
