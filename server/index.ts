@@ -234,8 +234,8 @@ app.post('/api/communities/:slug/members/:memberId/admin', async (req, res, next
     await client.query('BEGIN');
     await client.query("UPDATE community_members SET role='ADMIN', admin_token_hash=$1 WHERE id=$2", [hashToken(adminToken), req.params.memberId]);
     await client.query(
-      "INSERT INTO community_role_audit (community_id, member_id, previous_role, new_role, changed_by, created_at) VALUES ($1,$2,$3,'ADMIN','OWNER',NOW())",
-      [community.rows[0].id, req.params.memberId, member.rows[0].role],
+      "INSERT INTO community_role_audit (id, community_id, member_id, previous_role, new_role, changed_by, created_at) VALUES ($1,$2,$3,$4,'ADMIN','OWNER',NOW())",
+      [randomUUID(), community.rows[0].id, req.params.memberId, member.rows[0].role],
     );
     await client.query('COMMIT');
     res.json({ role: 'ADMIN', adminToken });
@@ -258,8 +258,8 @@ app.delete('/api/communities/:slug/members/:memberId/admin', async (req, res, ne
     await client.query('BEGIN');
     await client.query("UPDATE community_members SET role='MEMBER', admin_token_hash=NULL WHERE id=$1", [req.params.memberId]);
     await client.query(
-      "INSERT INTO community_role_audit (community_id, member_id, previous_role, new_role, changed_by, created_at) VALUES ($1,$2,'ADMIN','MEMBER','OWNER',NOW())",
-      [community.rows[0].id, req.params.memberId],
+      "INSERT INTO community_role_audit (id, community_id, member_id, previous_role, new_role, changed_by, created_at) VALUES ($1,$2,$3,'ADMIN','MEMBER','OWNER',NOW())",
+      [randomUUID(), community.rows[0].id, req.params.memberId],
     );
     await client.query('COMMIT');
     res.json({ role: 'MEMBER' });
