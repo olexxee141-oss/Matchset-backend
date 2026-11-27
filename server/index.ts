@@ -51,7 +51,7 @@ const communitySchema = z.object({
   name: z.string().trim().min(2).max(60),
   creatorName: z.string().trim().min(2).max(40),
 });
-const memberSchema = z.object({ name: z.string().trim().min(2).max(40) });
+const memberSchema = z.object({ name: z.string().trim().min(2).max(40), ownerToken: z.string().min(20) });
 const matchSchema = z.object({
   title: z.string().trim().min(2).max(80),
   memberIds: z.array(z.string().uuid()).min(4).max(500),
@@ -191,8 +191,9 @@ app.get('/api/communities/:slug', async (req, res, next) => {
 app.post('/api/communities/:slug/members', async (req, res, next) => {
   try {
     const input = memberSchema.parse(req.body);
-    const community = await pool.query('SELECT id FROM communities WHERE slug=$1', [req.params.slug]);
+    const community = await pool.query('SELECT id, owner_token_hash FROM communities WHERE slug=$1', [req.params.slug]);
     if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
+    if (!tokenMatches(input.ownerToken, community.rows[0].owner_token_hash)) return res.status(403).json({ error: 'Only the community creator can manage the roster.' });
     const name = input.name.trim();
     const result = await pool.query(
       'INSERT INTO community_members (id, community_id, display_name, normalized_name) VALUES ($1,$2,$3,$4) ON CONFLICT (community_id, normalized_name) DO NOTHING RETURNING id, display_name AS name, joined_at',
