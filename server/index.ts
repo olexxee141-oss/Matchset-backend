@@ -101,6 +101,100 @@ function publicSession(row: any) {
 function normalizeName(name: string) {
   return name.trim().normalize('NFKC').toLocaleLowerCase('en').replace(/\s+/g, ' ');
 }
+
+async function communityAccess(communityId: string, req: express.Request): Promise<{ role: 'OWNER' | 'ADMIN' | 'VIEWER'; memberId?: string }> {
+  const ownerToken = req.header('x-community-owner-token') || '';
+  if (ownerToken) {
+    const owner = await pool.query('SELECT owner_token_hash FROM communities WHERE id=$1', [communityId]);
+    if (owner.rowCount && tokenMatches(ownerToken, owner.rows[0].owner_token_hash)) return { role: 'OWNER' };
+  }
+  const adminToken = req.header('x-community-admin-token') || '';
+  if (adminToken) {
+    const admin = await pool.query(
+      "SELECT id FROM community_members WHERE community_id=$1 AND role='ADMIN' AND admin_token_hash=$2",
+      [communityId, hashToken(adminToken)],
+    );
+    if (admin.rowCount) return { role: 'ADMIN', memberId: admin.rows[0].id as string };
+  }
+  return { role: 'VIEWER' };
+}
+
+async function requireTournamentManager(communityId: string, req: express.Request, ownerToken?: string): Promise<boolean> {
+  const suppliedOwnerToken = ownerToken || req.header('x-community-owner-token') || '';
+  if (suppliedOwnerToken) {
+    const owner = await pool.query('SELECT owner_token_hash FROM communities WHERE id=$1', [communityId]);
+    if (owner.rowCount && tokenMatches(suppliedOwnerToken, owner.rows[0].owner_token_hash)) return true;
+  }
+  const adminToken = req.header('x-community-admin-token') || '';
+  if (!adminToken) return false;
+  const admin = await pool.query(
+    "SELECT id FROM community_members WHERE community_id=$1 AND role='ADMIN' AND admin_token_hash=$2",
+    [communityId, hashToken(adminToken)],
+  );
+  return Boolean(admin.rowCount);
+}
+
+async function persistTournamentGroups(
+  client: import('pg').PoolClient,
+  tournamentId: string,
+  communityId: string,
+  groups: z.infer<typeof tournamentGroupsSchema>['groups'],
+): Promise<void> {
+  const allMemberIds = groups.flatMap((group) => group.teams.flatMap((team) => team.memberIds));
+  if (new Set(allMemberIds).size !== allMemberIds.length) throw new Error('A player can only belong to one team in a tournament.');
+  const members = await client.query(
+    'SELECT id, display_name FROM community_members WHERE community_id=$1 AND id = ANY($2::uuid[])',
+    [communityId, allMemberIds],
+  );
+  if (members.rowCount !== allMemberIds.length) throw new Error('Every tournament player must belong to this community.');
+  const byId = new Map<string, string>(members.rows.map((member: { id: string; display_name: string }) => [member.id, member.display_name]));
+  await client.query('DELETE FROM tournament_groups WHERE tournament_id=$1', [tournamentId]);
+  for (const [groupIndex, group] of groups.entries()) {
+    const groupId = randomUUID();
+    await client.query(
+      'INSERT INTO tournament_groups (id, tournament_id, name, sort_order) VALUES ($1,$2,$3,$4)',
+      [groupId, tournamentId, group.name, groupIndex],
+    );
+    for (const [teamIndex, team] of group.teams.entries()) {
+      const snapshot = team.memberIds.map((id) => ({ id, name: byId.get(id) }));
+      await client.query(
+        'INSERT INTO tournament_teams (id, tournament_id, group_id, name, members, sort_order) VALUES ($1,$2,$3,$4,$5,$6)',
+        [randomUUID(), tournamentId, groupId, team.name, JSON.stringify(snapshot), teamIndex],
+      );
+    }
+  }
+}
+
+async function readTournaments(communityId: string): Promise<Array<{ id: string; name: string; createdAt: string; groups: Array<{ id: string; name: string; teams: Array<{ id: string; name: string; members: Array<{ id: string; name: string }> }> }> }>> {
+  const result = await pool.query(
+    `SELECT t.id AS tournament_id, t.name AS tournament_name, t.created_at,
+            g.id AS group_id, g.name AS group_name, g.sort_order AS group_order,
+            tm.id AS team_id, tm.name AS team_name, tm.members, tm.sort_order AS team_order
+       FROM tournaments t
+       LEFT JOIN tournament_groups g ON g.tournament_id=t.id
+       LEFT JOIN tournament_teams tm ON tm.group_id=g.id
+      WHERE t.community_id=$1
+      ORDER BY t.created_at DESC, g.sort_order, tm.sort_order`,
+    [communityId],
+  );
+  const tournaments = new Map<string, { id: string; name: string; createdAt: string; groups: Array<{ id: string; name: string; teams: Array<{ id: string; name: string; members: Array<{ id: string; name: string }> }> }> }>();
+  for (const row of result.rows as Array<any>) {
+    if (!tournaments.has(row.tournament_id)) tournaments.set(row.tournament_id, {
+      id: row.tournament_id, name: row.tournament_name, createdAt: row.created_at, groups: [],
+    });
+    const tournament = tournaments.get(row.tournament_id)!;
+    if (row.group_id) {
+      let group = tournament.groups.find((item) => item.id === row.group_id);
+      if (!group) {
+        group = { id: row.group_id, name: row.group_name, teams: [] };
+        tournament.groups.push(group);
+      }
+      if (row.team_id) group.teams.push({ id: row.team_id, name: row.team_name, members: row.members });
+    }
+  }
+  return [...tournaments.values()];
+}
+
 app.get('/api/health', async (_req, res, next) => {
   try {
     await pool.query('SELECT 1');
