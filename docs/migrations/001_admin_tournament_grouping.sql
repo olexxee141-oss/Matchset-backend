@@ -4,13 +4,8 @@ ALTER TABLE community_members
   ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'MEMBER',
   ADD COLUMN IF NOT EXISTS admin_token_hash text;
 
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'community_members_role_check') THEN
-    ALTER TABLE community_members
-      ADD CONSTRAINT community_members_role_check CHECK (role IN ('MEMBER', 'ADMIN'));
-  END IF;
-END $$;
+ALTER TABLE community_members
+  ADD CONSTRAINT community_members_role_check CHECK (role IN ('MEMBER', 'ADMIN'));
 
 CREATE TABLE IF NOT EXISTS community_role_audit (
   id uuid PRIMARY KEY,
