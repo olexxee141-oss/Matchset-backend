@@ -64,6 +64,20 @@ const resultSchema = z.object({
   winningTeamId: z.number().int().positive(),
 });
 
+const adminRoleSchema = z.object({ ownerToken: z.string().min(20) });
+const tournamentGroupsSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  ownerToken: z.string().min(20).optional(),
+  groups: z.array(z.object({
+    name: z.string().trim().min(1).max(30),
+    teams: z.array(z.object({
+      name: z.string().trim().min(1).max(40),
+      memberIds: z.array(z.string().uuid()).min(2).max(20),
+    })).min(1).max(20),
+  })).min(2).max(16),
+});
+const tournamentUpdateSchema = tournamentGroupsSchema.omit({ name: true });
+
 
 function hashToken(token: string) {
   return createHash('sha256').update(token).digest('hex');
@@ -170,10 +184,11 @@ app.get('/api/communities/:slug', async (req, res, next) => {
     const found = await pool.query('SELECT id, slug, name, created_at FROM communities WHERE slug=$1', [req.params.slug]);
     if (!found.rowCount) return res.status(404).json({ error: 'Community not found.' });
     const community = found.rows[0];
-    const [membersResult, matchesResult, leaderboardResult] = await Promise.all([
-      pool.query('SELECT id, display_name AS name, joined_at FROM community_members WHERE community_id=$1 ORDER BY display_name', [community.id]),
+    const [membersResult, matchesResult, leaderboardResult, tournaments] = await Promise.all([
+      pool.query("SELECT id, display_name AS name, joined_at, role FROM community_members WHERE community_id=$1 ORDER BY display_name", [community.id]),
       pool.query('SELECT id, title, teams, winning_team_id, created_at, completed_at FROM community_matches WHERE community_id=$1 ORDER BY created_at DESC LIMIT 100', [community.id]),
       pool.query('SELECT teams, winning_team_id FROM community_matches WHERE community_id=$1 AND completed_at IS NOT NULL', [community.id]),
+      readTournaments(community.id),
     ]);
     const matches = matchesResult.rows.map((row) => ({
       id: row.id, title: row.title, teams: row.teams, winningTeamId: row.winning_team_id,
@@ -184,6 +199,8 @@ app.get('/api/communities/:slug', async (req, res, next) => {
       members: membersResult.rows,
       matches,
       leaderboard: buildCommunityLeaderboard(leaderboardResult.rows),
+      tournaments,
+      access: await communityAccess(community.id, req),
     });
   } catch (error) { next(error); }
 });
@@ -202,6 +219,97 @@ app.post('/api/communities/:slug/members', async (req, res, next) => {
     if (!result.rowCount) return res.status(409).json({ error: 'That name is already in this community. Ask the member to share their member name or choose a distinct name.' });
     res.status(201).json({ member: result.rows[0] });
   } catch (error) { next(error); }
+});
+
+app.post('/api/communities/:slug/members/:memberId/admin', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const input = adminRoleSchema.parse(req.body);
+    const community = await pool.query('SELECT id, owner_token_hash FROM communities WHERE slug=$1', [req.params.slug]);
+    if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
+    if (!tokenMatches(input.ownerToken, community.rows[0].owner_token_hash)) return res.status(403).json({ error: 'Only the community owner can appoint admins.' });
+    const member = await pool.query('SELECT id, role FROM community_members WHERE id=$1 AND community_id=$2', [req.params.memberId, community.rows[0].id]);
+    if (!member.rowCount) return res.status(404).json({ error: 'Community member not found.' });
+    const adminToken = randomBytes(32).toString('base64url');
+    await client.query('BEGIN');
+    await client.query("UPDATE community_members SET role='ADMIN', admin_token_hash=$1 WHERE id=$2", [hashToken(adminToken), req.params.memberId]);
+    await client.query(
+      "INSERT INTO community_role_audit (community_id, member_id, previous_role, new_role, changed_by, created_at) VALUES ($1,$2,$3,'ADMIN','OWNER',NOW())",
+      [community.rows[0].id, req.params.memberId, member.rows[0].role],
+    );
+    await client.query('COMMIT');
+    res.json({ role: 'ADMIN', adminToken });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    next(error);
+  } finally { client.release(); }
+});
+
+app.delete('/api/communities/:slug/members/:memberId/admin', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const input = adminRoleSchema.parse(req.body);
+    const community = await pool.query('SELECT id, owner_token_hash FROM communities WHERE slug=$1', [req.params.slug]);
+    if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
+    if (!tokenMatches(input.ownerToken, community.rows[0].owner_token_hash)) return res.status(403).json({ error: 'Only the community owner can remove admins.' });
+    const member = await pool.query('SELECT id, role FROM community_members WHERE id=$1 AND community_id=$2', [req.params.memberId, community.rows[0].id]);
+    if (!member.rowCount) return res.status(404).json({ error: 'Community member not found.' });
+    if (member.rows[0].role !== 'ADMIN') return res.status(409).json({ error: 'This member is not an admin.' });
+    await client.query('BEGIN');
+    await client.query("UPDATE community_members SET role='MEMBER', admin_token_hash=NULL WHERE id=$1", [req.params.memberId]);
+    await client.query(
+      "INSERT INTO community_role_audit (community_id, member_id, previous_role, new_role, changed_by, created_at) VALUES ($1,$2,'ADMIN','MEMBER','OWNER',NOW())",
+      [community.rows[0].id, req.params.memberId],
+    );
+    await client.query('COMMIT');
+    res.json({ role: 'MEMBER' });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    next(error);
+  } finally { client.release(); }
+});
+
+app.post('/api/communities/:slug/tournaments', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const input = tournamentGroupsSchema.parse(req.body);
+    const community = await pool.query('SELECT id FROM communities WHERE slug=$1', [req.params.slug]);
+    if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
+    if (!(await requireTournamentManager(community.rows[0].id, req, input.ownerToken))) return res.status(403).json({ error: 'Only the owner or an appointed admin can manage tournament groups.' });
+    await client.query('BEGIN');
+    const tournamentId = randomUUID();
+    await client.query(
+      'INSERT INTO tournaments (id, community_id, name) VALUES ($1,$2,$3)',
+      [tournamentId, community.rows[0].id, input.name],
+    );
+    await persistTournamentGroups(client, tournamentId, community.rows[0].id, input.groups);
+    await client.query('COMMIT');
+    res.status(201).json({ tournaments: await readTournaments(community.rows[0].id) });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    if (error instanceof Error && (error.message.includes('player') || error.message.includes('belong to'))) return res.status(400).json({ error: error.message });
+    next(error);
+  } finally { client.release(); }
+});
+
+app.put('/api/communities/:slug/tournaments/:tournamentId/groups', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const input = tournamentUpdateSchema.parse(req.body);
+    const community = await pool.query('SELECT id FROM communities WHERE slug=$1', [req.params.slug]);
+    if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
+    if (!(await requireTournamentManager(community.rows[0].id, req, input.ownerToken))) return res.status(403).json({ error: 'Only the owner or an appointed admin can manage tournament groups.' });
+    const tournament = await pool.query('SELECT id FROM tournaments WHERE id=$1 AND community_id=$2', [req.params.tournamentId, community.rows[0].id]);
+    if (!tournament.rowCount) return res.status(404).json({ error: 'Tournament not found.' });
+    await client.query('BEGIN');
+    await persistTournamentGroups(client, req.params.tournamentId, community.rows[0].id, input.groups);
+    await client.query('COMMIT');
+    res.json({ tournaments: await readTournaments(community.rows[0].id) });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    if (error instanceof Error && (error.message.includes('player') || error.message.includes('belong to'))) return res.status(400).json({ error: error.message });
+    next(error);
+  } finally { client.release(); }
 });
 
 app.post('/api/communities/:slug/matches', async (req, res, next) => {
