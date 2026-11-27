@@ -24,6 +24,11 @@ Never commit real credentials. The API does not execute database DDL at startup.
 ## API
 See [docs/api-contract.md](docs/api-contract.md) for the full v1 route and payload contract. It intentionally matches the current frontend API.
 
+## Admins and tournaments
+Community owners can promote roster members to Admin. Admins receive a private access link and can create tournaments and move teams between groups. Only owners can manage the roster or roles. Role changes are audited, and demotion revokes the admin token. Because MatchSet currently has no user accounts, admin access is represented by a private bearer link; anyone who obtains that link can act as that admin until the owner revokes access.
+
+Before deploying the new API, apply [migration 001](docs/migrations/001_admin_tournament_grouping.sql) to the existing Neon database. The API never runs production DDL automatically.
+
 ## Local development
 ```bash
 npm install
