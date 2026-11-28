@@ -487,6 +487,7 @@ app.post('/api/communities/:slug/matches/:matchId/rotation/result', async (req, 
     const match = found.rows[0];
     if (!tokenMatches(input.resultToken, match.result_token_hash)) { await client.query('ROLLBACK'); return res.status(403).json({ error: 'Only the match organiser can record its result.' }); }
     if (!match.rotation_state) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'This match does not have a rotation session.' }); }
+    if (input.outcome !== 'DRAW') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Wins are determined by the goal target or timer. Only an organiser-declared draw is available here.' }); }
     const nextState = recordRotationResult(match.rotation_state as RotationState, input.outcome as RotationOutcome);
     const updated = await client.query(
       'UPDATE community_matches SET rotation_state=$1 WHERE id=$2 RETURNING id, title, teams, winning_team_id, rotation_state, created_at, completed_at',
