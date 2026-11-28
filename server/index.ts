@@ -5,6 +5,8 @@ import helmet from 'helmet';
 import cors from 'cors';
 import { Pool } from 'pg';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createAuthRouter } from './auth/authRouter.js';
+import { createRecoveryEmailProvider } from './email/recoveryEmailProvider.js';
 import { z } from 'zod';
 import { distributePlayers, distributeItems } from '../src/shared/distribute.js';
 import { buildCommunityLeaderboard } from '../src/shared/leaderboard.js';
@@ -42,6 +44,11 @@ async function ensureDatabase() {
 app.use('/api', (_req, _res, next) => {
   void ensureDatabase().then(() => next()).catch(next);
 });
+
+const recoveryEmailProvider = process.env.AUTH_EMAIL_PROVIDER === 'resend'
+  ? createRecoveryEmailProvider()
+  : { async sendRecoveryVerificationEmail() { throw new Error('Recovery email delivery is not configured.'); } };
+app.use('/api/auth', createAuthRouter(pool, recoveryEmailProvider));
 
 const inputSchema = z.object({
   name: z.string().trim().min(1).max(80),
