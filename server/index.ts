@@ -26,7 +26,7 @@ const pool = new Pool({
 });
 
 app.use(helmet({ crossOriginResourcePolicy: false }));
-const allowedOrigins = [...new Set(['https://matchset-teal.vercel.app', 'http://localhost:5173', ...(process.env.FRONTEND_ORIGIN || '').split(',').map((origin) => origin.trim()).filter(Boolean)])];
+const allowedOrigins = [...new Set(['https://matchset-teal.vercel.app', 'https://matchset-y1bm.vercel.app', 'http://localhost:5173', ...(process.env.FRONTEND_ORIGIN || '').split(',').map((origin) => origin.trim()).filter(Boolean)])];
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: '100kb' }));
 
