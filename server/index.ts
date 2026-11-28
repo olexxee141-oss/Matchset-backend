@@ -291,7 +291,7 @@ app.get('/api/communities/:slug', async (req, res, next) => {
       readTournaments(community.id),
     ]);
     const matches = matchesResult.rows.map((row) => ({
-      id: row.id, title: row.title, teams: row.teams, winningTeamId: row.winning_team_id,
+      id: row.id, title: row.title, teams: row.teams, winningTeamId: row.winning_team_id, rotationState: row.rotation_state,
       createdAt: row.created_at, completedAt: row.completed_at,
     }));
     res.json({
