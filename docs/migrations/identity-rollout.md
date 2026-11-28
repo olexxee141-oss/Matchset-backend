@@ -2,12 +2,18 @@
 
 ## Current status
 
-- Migrations 003 and 004 are committed but have **not** been applied to the production Neon branch.
-- Both migrations were applied together on a disposable branch cloned from production data.
-- The test branch retained the original production-shaped row counts: 2 communities, 4 community members, 0 matches, 0 users, 0 passkeys.
-- A duplicate display-name insert succeeded on the test branch and was rolled back.
-- The new auth challenge flow-token and recovery-code acknowledgement columns were verified.
-- No production data or schema was changed during validation.
+**Migrations 003 and 004 were applied successfully to production on 2026-11-28 after explicit user approval.**
+
+- Production branch: `production` (`br-rough-mountain-bd3jmpma`).
+- Pre-migration manual snapshot: `matchset-before-identity-migrations-003-004-2026-11-28` (`snap-lucky-butterfly-bdebuwgu`).
+- Migration application used Neon's prepared-migration workflow: both migrations were tested on a temporary branch cloned from production, verified, then applied to the parent production branch.
+- Temporary verification branch was deleted after application.
+- Production post-migration counts: 2 communities, 4 community members, 0 matches, 0 tournaments, 0 users, 0 passkeys, 0 challenges, 0 sessions.
+- Existing community and membership records/IDs remain unchanged; all legacy memberships remain unclaimed.
+- The old community display-name uniqueness constraint is removed; the new active account-per-community uniqueness index is present.
+- A duplicate display-name insert was tested and rolled back on the disposable branch.
+- Production schema inspection confirmed the recovery-code acknowledgement and challenge flow-token columns.
+- No user accounts or credentials were backfilled.
 
 ## Preconditions before production
 
