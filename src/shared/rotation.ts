@@ -81,7 +81,7 @@ function finishGame(state: RotationState, outcome: RotationOutcome, playedAt: st
   if (state.status !== 'ACTIVE') throw new Error('This rotation is not active.');
   const [teamAId, teamBId] = state.activeTeamIds;
   if (teamAId === undefined || teamBId === undefined) throw new Error('Two active teams are required.');
-  const previousState = snapshot(state);
+  const previousState = { ...snapshot(state), score: [0, 0] as [number, number], goals: [] };
   const goals = [...(state.goals ?? [])];
   const score = [...(state.score ?? [0, 0])] as [number, number];
   const game: RotationGame = {
