@@ -153,11 +153,11 @@ async function persistTournamentGroups(
   const allMemberIds = groups.flatMap((group) => group.teams.flatMap((team) => team.memberIds));
   if (new Set(allMemberIds).size !== allMemberIds.length) throw new Error('A player can only belong to one team in a tournament.');
   const members = await client.query(
-    'SELECT id, display_name FROM community_members WHERE community_id=$1 AND id = ANY($2::uuid[])',
+    'SELECT id, display_name, member_code FROM community_members WHERE community_id=$1 AND id = ANY($2::uuid[])',
     [communityId, allMemberIds],
   );
   if (members.rowCount !== allMemberIds.length) throw new Error('Every tournament player must belong to this community.');
-  const byId = new Map<string, string>(members.rows.map((member: { id: string; display_name: string }) => [member.id, member.display_name]));
+  const byId = new Map<string, { name: string; memberCode: string }>(members.rows.map((member: { id: string; display_name: string; member_code: string }) => [member.id, { name: member.display_name, memberCode: member.member_code }]));
   await client.query('DELETE FROM tournament_groups WHERE tournament_id=$1', [tournamentId]);
   for (const [groupIndex, group] of groups.entries()) {
     const groupId = randomUUID();
@@ -166,7 +166,7 @@ async function persistTournamentGroups(
       [groupId, tournamentId, group.name, groupIndex],
     );
     for (const [teamIndex, team] of group.teams.entries()) {
-      const snapshot = team.memberIds.map((id) => ({ id, name: byId.get(id) }));
+      const snapshot = team.memberIds.map((id) => ({ id, name: byId.get(id)?.name, memberCode: byId.get(id)?.memberCode }));
       await client.query(
         'INSERT INTO tournament_teams (id, tournament_id, group_id, name, members, sort_order) VALUES ($1,$2,$3,$4,$5,$6)',
         [randomUUID(), tournamentId, groupId, team.name, JSON.stringify(snapshot), teamIndex],
@@ -270,9 +270,10 @@ app.post('/api/communities', async (req, res, next) => {
         'INSERT INTO communities (id, slug, name, owner_token_hash) VALUES ($1,$2,$3,$4) RETURNING id, slug, name, created_at',
         [communityId, slug, input.name, hashToken(ownerToken)],
       );
+      const memberCode = memberId.replace(/-/g, '').slice(0, 8).toUpperCase();
       const member = await client.query(
-        'INSERT INTO community_members (id, community_id, display_name, normalized_name) VALUES ($1,$2,$3,$4) RETURNING id, display_name',
-        [memberId, communityId, memberName, normalizeName(memberName)],
+        'INSERT INTO community_members (id, community_id, display_name, normalized_name, member_code) VALUES ($1,$2,$3,$4,$5) RETURNING id, display_name, member_code',
+        [memberId, communityId, memberName, normalizeName(memberName), memberCode],
       );
       await client.query('COMMIT');
       res.status(201).json({ community: community.rows[0], member: member.rows[0], ownerToken });
@@ -289,7 +290,7 @@ app.get('/api/communities/:slug', async (req, res, next) => {
     if (!found.rowCount) return res.status(404).json({ error: 'Community not found.' });
     const community = found.rows[0];
     const [membersResult, matchesResult, leaderboardResult, tournaments] = await Promise.all([
-      pool.query("SELECT id, display_name AS name, joined_at, role FROM community_members WHERE community_id=$1 ORDER BY display_name", [community.id]),
+      pool.query("SELECT id, display_name AS name, member_code AS \"memberCode\", joined_at, role FROM community_members WHERE community_id=$1 ORDER BY display_name, member_code", [community.id]),
       pool.query('SELECT id, title, teams, winning_team_id, rotation_state, created_at, completed_at FROM community_matches WHERE community_id=$1 ORDER BY created_at DESC LIMIT 100', [community.id]),
       pool.query('SELECT teams, winning_team_id, rotation_state FROM community_matches WHERE community_id=$1 AND (completed_at IS NOT NULL OR rotation_state IS NOT NULL)', [community.id]),
       readTournaments(community.id),
@@ -316,11 +317,12 @@ app.post('/api/communities/:slug/members', async (req, res, next) => {
     if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
     if (!tokenMatches(input.ownerToken, community.rows[0].owner_token_hash)) return res.status(403).json({ error: 'Only the community creator can manage the roster.' });
     const name = input.name.trim();
+    const memberId = randomUUID();
+    const memberCode = memberId.replace(/-/g, '').slice(0, 8).toUpperCase();
     const result = await pool.query(
-      'INSERT INTO community_members (id, community_id, display_name, normalized_name) VALUES ($1,$2,$3,$4) ON CONFLICT (community_id, normalized_name) DO NOTHING RETURNING id, display_name AS name, joined_at',
-      [randomUUID(), community.rows[0].id, name, normalizeName(name)],
+      'INSERT INTO community_members (id, community_id, display_name, normalized_name, member_code) VALUES ($1,$2,$3,$4,$5) RETURNING id, display_name AS name, member_code AS \"memberCode\", joined_at',
+      [memberId, community.rows[0].id, name, normalizeName(name), memberCode],
     );
-    if (!result.rowCount) return res.status(409).json({ error: 'That name is already in this community. Ask the member to share their member name or choose a distinct name.' });
     res.status(201).json({ member: result.rows[0] });
   } catch (error) { next(error); }
 });
@@ -423,21 +425,21 @@ app.post('/api/communities/:slug/matches', async (req, res, next) => {
     if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
     if (!tokenMatches(input.ownerToken, community.rows[0].owner_token_hash)) return res.status(403).json({ error: 'Only the community organiser can create matches.' });
     const membersResult = await pool.query(
-      'SELECT id, display_name FROM community_members WHERE community_id=$1 AND id = ANY($2::uuid[])',
+      'SELECT id, display_name, member_code FROM community_members WHERE community_id=$1 AND id = ANY($2::uuid[])',
       [community.rows[0].id, input.memberIds],
     );
     if (membersResult.rowCount !== input.memberIds.length) return res.status(400).json({ error: 'Every selected player must belong to this community.' });
     if (!membersResult.rows.some((member: any) => member.id === input.createdByMemberId)) return res.status(400).json({ error: 'The match organiser must be a member of this community.' });
     if (Math.ceil(membersResult.rowCount / input.playersPerTeam) < 2) return res.status(400).json({ error: 'Add enough players to create at least two teams.' });
-    const names = membersResult.rows.map((member) => member.display_name);
-    const distributed = distributePlayers(names, input.playersPerTeam);
-    const membersByName = new Map(membersResult.rows.map((member) => [normalizeName(member.display_name), member]));
+    // Distribute stable member IDs, not display names: duplicate names are valid.
+    const membersById = new Map(membersResult.rows.map((member) => [member.id, member]));
+    const distributed = distributePlayers(membersResult.rows.map((member) => member.id), input.playersPerTeam);
     const teams = distributed.map((team) => ({
       id: team.id,
-      players: team.players.map((name) => {
-        const member = membersByName.get(normalizeName(name));
+      players: team.players.map((memberId) => {
+        const member = membersById.get(memberId);
         if (!member) throw new Error('Could not resolve a team member.');
-        return { id: member.id, name: member.display_name };
+        return { id: member.id, name: member.display_name, memberCode: member.member_code };
       }),
     }));
     const matchId = randomUUID();
