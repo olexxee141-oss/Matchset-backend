@@ -14,3 +14,5 @@ CREATE TABLE auth_recovery_attempt_limits (
 CREATE INDEX auth_recovery_attempt_limits_lock_idx
   ON auth_recovery_attempt_limits(locked_until)
   WHERE locked_until IS NOT NULL;
+
+ALTER TABLE user_recovery_codes ADD COLUMN acknowledged_at timestamptz;
