@@ -1,19 +1,34 @@
 import { describe, expect, it } from 'vitest';
+import { equalHex, parseCode, recoveryHash } from '../server/auth/authRouter.js';
 
-describe('passkey and recovery contract', () => {
-  it('uses a high-entropy recovery code scoped to an opaque account ID', () => {
-    const userId = 'c4c6ec3a-9328-4b4f-a9bb-54b3a5c9e1d1';
-    const secret = Buffer.alloc(32, 7).toString('base64url');
-    const code = 'MSR-' + userId + '.' + secret;
-    expect(code).toMatch(/^MSR-[0-9a-f-]{36}\.[A-Za-z0-9_-]{40,60}$/i);
+describe('passkey recovery security primitives', () => {
+  const userId = 'c4c6ec3a-9328-4b4f-a9bb-54b3a5c9e1d1';
+  const secret = Buffer.alloc(32, 7).toString('base64url');
+
+  it('parses an account-scoped high-entropy recovery code', () => {
+    expect(parseCode('MSR-' + userId + '.' + secret)).toEqual({ userId, secret });
   });
 
-  it('keeps email out of the identity schema', () => {
-    const persistentTables = ['users','user_passkey_credentials','user_recovery_codes','auth_challenges','auth_sessions','auth_recovery_attempt_limits'];
-    expect(persistentTables.some((name) => name.includes('email'))).toBe(false);
+  it('rejects malformed recovery code account identifiers', () => {
+    expect(parseCode('MSR-not-a-uuid.' + secret)).toBeNull();
+    expect(parseCode('MSR-' + userId + '.short')).toBeNull();
   });
 
-  it('uses discoverable passkey login without account lookup fields', () => {
-    expect('/login/options').toBe('/login/options');
+  it('derives a salted, non-plaintext recovery verifier', () => {
+    const salt = 'c8a5e15e29ef8c14f731c61a6b6c02a1';
+    const verifier = recoveryHash(secret, salt);
+    expect(verifier).toHaveLength(128);
+    expect(verifier).not.toContain(secret);
+    expect(recoveryHash(secret, salt)).toBe(verifier);
+    expect(recoveryHash(secret + 'x', salt)).not.toBe(verifier);
+    expect(recoveryHash(secret, 'different-salt')).not.toBe(verifier);
+  });
+
+  it('compares full-length recovery verifiers safely and rejects malformed input', () => {
+    const a = 'ab'.repeat(64);
+    expect(equalHex(a, a)).toBe(true);
+    expect(equalHex(a, 'cd'.repeat(64))).toBe(false);
+    expect(equalHex('not-hex', a)).toBe(false);
+    expect(equalHex('ab', 'abcd')).toBe(false);
   });
 });

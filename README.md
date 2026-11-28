@@ -14,7 +14,7 @@ Apply migrations in order on a disposable Neon branch first:
 3. `docs/migrations/003_shared_identity.sql`
 4. `docs/migrations/004_auth_flow_security.sql`
 
-No migration is run automatically by the application. Production application requires backup, explicit review, and rollback plan.
+No migration is run automatically by the application. Production application requires backup, explicit review, and rollback plan. See [identity rollout and rollback plan](docs/migrations/identity-rollout.md).
 
 ## Local development
 
