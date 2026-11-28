@@ -32,6 +32,15 @@ Before deploying the new API, apply [migration 001](docs/migrations/001_admin_to
 ## Winner-stays match rotation
 New community matches start with Set 1 vs Set 2. A win keeps the winning team on the pitch and moves the losing team to the back of the queue; a draw moves both teams to the back and brings in the next two. Every game is recorded, including draws. Organisers configure a 1–5 goal target and a 1–60 minute timer per rotation game. Goals record the scoring team, scorer and optional assister; reaching the target ends the game automatically. Timer expiry awards the win to the higher-scoring team or records a draw when tied. Timer timestamps, goal events, scores and queue state are stored together in `community_matches.rotation_state` JSONB. Organisers can pause/resume the timer and undo the latest completed game.
 
+## Offline support — protocol planned, not implemented
+
+The backend must support safe replay of queued organiser operations before the frontend enables offline writes. The implementation has not started. The design requires stable operation IDs, atomic idempotency receipts, monotonic session versions, ordered event validation, transactional rotation-state updates, explicit conflict responses, and a defensible offline-timer policy.
+
+- [Backend offline protocol and implementation gates](docs/offline-support.md)
+- [Frontend offline product and IndexedDB plan](https://github.com/olexxee141-oss/matchset/blob/main/docs/offline-support.md)
+
+The existing `rotation_state` JSONB is the current match-state store, but it must not be assumed to provide durable request idempotency by itself. Any new persistence design must be additive, tested on a disposable Neon branch, and approved before production migration. The API must remain free of automatic DDL at startup. Offline results remain provisional until accepted by the server; first release assumes one controlling organiser device per match session.
+
 ## Local development
 ```bash
 npm install
