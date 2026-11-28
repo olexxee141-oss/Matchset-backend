@@ -1,49 +1,32 @@
-# MatchSet Backend
+# MatchSet backend
 
-Dedicated Express API for MatchSet. The frontend remains in [olexxee141-oss/matchset](https://github.com/olexxee141-oss/matchset).
+## Authentication
 
-## Responsibilities
-- REST API for standalone player arrangements and community matches.
-- PostgreSQL persistence through Neon.
-- Input validation, organiser/result token checks, team distribution, winner-stays rotation, and leaderboard calculation.
+Passkey authentication uses discoverable WebAuthn credentials. Account creation does not require an email address. Recovery requires the one-time recovery code and an email address supplied at recovery time. The recipient address is passed directly to the email provider and is not persisted by MatchSet.
 
-## Runtime
-- Node.js 20+
-- TypeScript, Express, PostgreSQL (`pg`), Zod
-- Deploy as a Node web service with build command `npm install && npm run build` and start command `npm start`.
+Configure `WEBAUTHN_RP_NAME`, `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGIN`, `APP_BASE_URL`, `AUTH_EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, and `AUTH_EMAIL_FROM`. Production must use HTTPS and the exact frontend origin. Do not use preview deployment origins as production RP origins.
 
-## Environment
-Copy `.env.example` to `.env` locally. Set:
-- `DATABASE_URL`: Neon pooled connection string with SSL.
-- `FRONTEND_ORIGIN`: exact frontend origin (comma-separated if multiple origins are required).
-- `PORT`: supplied by most hosting platforms; defaults to 4000.
-- `NODE_ENV`: set to `production` by the host.
+## Database migrations
 
-Never commit real credentials. The API does not execute database DDL at startup. Existing Neon production tables are retained and managed separately.
+Apply migrations in order on a disposable Neon branch first:
+1. `docs/migrations/001_admin_tournament_grouping.sql`
+2. `docs/migrations/002_winner_stays_rotation.sql`
+3. `docs/migrations/003_shared_identity.sql`
+4. `docs/migrations/004_auth_flow_security.sql`
 
-## API
-See [docs/api-contract.md](docs/api-contract.md) for the full v1 route and payload contract. It intentionally matches the current frontend API.
-
-## Admins and tournaments
-Community owners can promote roster members to Admin. Admins receive a private access link and can create tournaments and move teams between groups. Only owners can manage the roster or roles. Role changes are audited, and demotion revokes the admin token. Because MatchSet currently has no user accounts, admin access is represented by a private bearer link; anyone who obtains that link can act as that admin until the owner revokes access.
-
-Before deploying the new API, apply [migration 001](docs/migrations/001_admin_tournament_grouping.sql) and [migration 002](docs/migrations/002_winner_stays_rotation.sql) to the existing Neon database, in order. The API never runs production DDL automatically. Migration 002 is additive and leaves all existing matches untouched.
-
-## Winner-stays match rotation
-New community matches start with Set 1 vs Set 2. A win keeps the winning team on the pitch and moves the losing team to the back of the queue; a draw moves both teams to the back and brings in the next two. Every game is recorded, including draws. Organisers configure a 1–5 goal target and a 1–60 minute timer per rotation game. Goals record the scoring team, scorer and optional assister; reaching the target ends the game automatically. Timer expiry awards the win to the higher-scoring team or records a draw when tied. Timer timestamps, goal events, scores and queue state are stored together in `community_matches.rotation_state` JSONB. Organisers can pause/resume the timer and undo the latest completed game.
+No migration is run automatically by the application. Production application requires backup, explicit review, and rollback plan. See [identity rollout and rollback plan](docs/migrations/identity-rollout.md).
 
 ## Local development
+
 ```bash
 npm install
-cp .env.example .env
 npm run dev
 ```
 
 ## Verification
+
 ```bash
 npm run typecheck
 npm test
 npm run build
 ```
-
-CI runs all three checks on pushes and pull requests to `main`.

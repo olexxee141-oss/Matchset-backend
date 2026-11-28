@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { distributePlayers } from '../src/shared/distribute.js';
+import { distributePlayers, distributeItems } from '../src/shared/distribute.js';
 import { buildCommunityLeaderboard } from '../src/shared/leaderboard.js';
 
 describe('distributePlayers', () => {
@@ -12,6 +12,18 @@ describe('distributePlayers', () => {
     expect(Math.max(...sets.map((set) => set.players.length)) - Math.min(...sets.map((set) => set.players.length))).toBeLessThanOrEqual(1);
   });
   it('rejects invalid group sizes', () => expect(() => distributePlayers(['A', 'B'], 1)).toThrow());
+  it('retains distinct members who share the same display name', () => {
+    const members = [
+      { id: 'member-1', name: 'Alex' },
+      { id: 'member-2', name: 'Alex' },
+      { id: 'member-3', name: 'Sam' },
+      { id: 'member-4', name: 'Sam' },
+    ];
+    const sets = distributeItems(members, 2);
+    const assigned = sets.flatMap((set) => set.players);
+    expect(assigned.map((member) => member.id).sort()).toEqual(members.map((member) => member.id).sort());
+    expect(assigned.filter((member) => member.name === 'Alex')).toHaveLength(2);
+  });
 });
 
 describe('buildCommunityLeaderboard', () => {

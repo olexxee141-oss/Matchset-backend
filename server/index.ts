@@ -5,8 +5,10 @@ import helmet from 'helmet';
 import cors from 'cors';
 import { Pool } from 'pg';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createAuthRouter } from './auth/authRouter.js';
+import { createRecoveryEmailProvider } from './email/recoveryEmailProvider.js';
 import { z } from 'zod';
-import { distributePlayers } from '../src/shared/distribute.js';
+import { distributePlayers, distributeItems } from '../src/shared/distribute.js';
 import { buildCommunityLeaderboard } from '../src/shared/leaderboard.js';
 import { createRotationState, recordRotationGoal, recordRotationResult, undoRotationResult, pauseRotationTimer, resumeRotationTimer, expireRotationTimer, remainingTimeMs, type RotationOutcome, type RotationState } from '../src/shared/rotation.js';
 
@@ -24,7 +26,7 @@ const pool = new Pool({
 });
 
 app.use(helmet({ crossOriginResourcePolicy: false }));
-const allowedOrigins = [...new Set(['https://matchset-teal.vercel.app', 'http://localhost:5173', ...(process.env.FRONTEND_ORIGIN || '').split(',').map((origin) => origin.trim()).filter(Boolean)])];
+const allowedOrigins = [...new Set(['https://matchset-teal.vercel.app', 'https://matchset-y1bm.vercel.app', 'http://localhost:5173', ...(process.env.FRONTEND_ORIGIN || '').split(',').map((origin) => origin.trim()).filter(Boolean)])];
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: '100kb' }));
 
@@ -42,6 +44,11 @@ async function ensureDatabase() {
 app.use('/api', (_req, _res, next) => {
   void ensureDatabase().then(() => next()).catch(next);
 });
+
+const recoveryEmailProvider = process.env.AUTH_EMAIL_PROVIDER === 'resend'
+  ? createRecoveryEmailProvider()
+  : { async sendRecoveryVerificationEmail() { throw new Error('Recovery email delivery is not configured.'); } };
+app.use('/api/auth', createAuthRouter(pool, recoveryEmailProvider));
 
 const inputSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -320,8 +327,8 @@ app.post('/api/communities/:slug/members', async (req, res, next) => {
     const memberId = randomUUID();
     const memberCode = memberId.replace(/-/g, '').slice(0, 8).toUpperCase();
     const result = await pool.query(
-      'INSERT INTO community_members (id, community_id, display_name, normalized_name, member_code) VALUES ($1,$2,$3,$4,$5) RETURNING id, display_name AS name, member_code AS \"memberCode\", joined_at',
-      [memberId, community.rows[0].id, name, normalizeName(name), memberCode],
+      'INSERT INTO community_members (id, community_id, display_name, normalized_name) VALUES ($1,$2,$3,$4) RETURNING id, display_name AS name, joined_at',
+      [randomUUID(), community.rows[0].id, name, normalizeName(name)],
     );
     res.status(201).json({ member: result.rows[0] });
   } catch (error) { next(error); }
@@ -431,16 +438,10 @@ app.post('/api/communities/:slug/matches', async (req, res, next) => {
     if (membersResult.rowCount !== input.memberIds.length) return res.status(400).json({ error: 'Every selected player must belong to this community.' });
     if (!membersResult.rows.some((member: any) => member.id === input.createdByMemberId)) return res.status(400).json({ error: 'The match organiser must be a member of this community.' });
     if (Math.ceil(membersResult.rowCount / input.playersPerTeam) < 2) return res.status(400).json({ error: 'Add enough players to create at least two teams.' });
-    // Distribute stable member IDs, not display names: duplicate names are valid.
-    const membersById = new Map(membersResult.rows.map((member) => [member.id, member]));
-    const distributed = distributePlayers(membersResult.rows.map((member) => member.id), input.playersPerTeam);
+    const distributed = distributeItems(membersResult.rows as Array<{ id: string; display_name: string }>, input.playersPerTeam);
     const teams = distributed.map((team) => ({
       id: team.id,
-      players: team.players.map((memberId) => {
-        const member = membersById.get(memberId);
-        if (!member) throw new Error('Could not resolve a team member.');
-        return { id: member.id, name: member.display_name, memberCode: member.member_code };
-      }),
+      players: team.players.map((member) => ({ id: member.id, name: member.display_name })),
     }));
     const matchId = randomUUID();
     const resultToken = randomBytes(32).toString('base64url');
@@ -601,7 +602,7 @@ app.post('/api/communities/:slug/matches/:matchId/rotation/undo', async (req, re
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (error instanceof z.ZodError) return res.status(400).json({ error: error.issues[0]?.message || 'Invalid input.' });
-  if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') return res.status(409).json({ error: 'That name is already registered in this community.' });
+  if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') return res.status(409).json({ error: 'A conflicting record already exists.' });
   console.error(error);
   return res.status(500).json({ error: 'Something went wrong. Please try again.' });
 });
