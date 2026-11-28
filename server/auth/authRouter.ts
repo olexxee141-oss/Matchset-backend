@@ -21,13 +21,13 @@ const recoveryVerifySchema = z.object({ token: z.string().min(32).max(200) });
 
 function sha(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function equalHex(a: string, b: string): boolean {
-  if (!/^[a-f0-9]{64}$/i.test(a) || !/^[a-f0-9]{64}$/i.test(b)) return false;
+  if (!/^(?:[a-f0-9]{2})+$/i.test(a) || !/^(?:[a-f0-9]{2})+$/i.test(b) || a.length !== b.length) return false;
   return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
 function token(bytes = 32): string { return randomBytes(bytes).toString('base64url'); }
 function codeFor(userId: string): string { return 'MSR-' + userId + '.' + token(32); }
 function parseCode(code: string): { userId: string; secret: string } | null {
-  const match = /^MSR-([0-9a-f-]{36})\.([A-Za-z0-9_-]{40,60})$/i.exec(code);
+  const match = /^MSR-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([A-Za-z0-9_-]{40,60})$/i.exec(code);
   return match ? { userId: match[1], secret: match[2] } : null;
 }
 function recoveryHash(secret: string, salt: string): string { return scryptSync(secret, salt, 64).toString('hex'); }
@@ -164,12 +164,17 @@ export function createAuthRouter(pool: Pool, emailProvider: RecoveryEmailProvide
     const input = responseSchema.safeParse(req.body);
     const flow = cookie(req, FLOW_COOKIE);
     if (!input.success || !flow) return res.status(400).json({ error: 'Registration expired. Start again.' });
+    const attempt = await pool.query(
+      "UPDATE auth_challenges SET attempt_count=attempt_count+1 WHERE flow_token_hash=$1 AND purpose='PASSKEY_REGISTRATION' AND consumed_at IS NULL AND expires_at>NOW() AND attempt_count<5 RETURNING id",
+      [sha(flow)],
+    );
+    if (!attempt.rowCount) return res.status(400).json({ error: 'Registration expired or too many attempts. Start again.' });
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       const challenge = await client.query(
-        "SELECT id,user_id,challenge_hash FROM auth_challenges WHERE flow_token_hash=$1 AND purpose='PASSKEY_REGISTRATION' AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE",
-        [sha(flow)],
+        "SELECT id,user_id,challenge_hash FROM auth_challenges WHERE id=$1 AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE",
+        [attempt.rows[0].id],
       );
       if (!challenge.rowCount) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Registration expired. Start again.' }); }
       const userId = challenge.rows[0].user_id as string;
@@ -203,12 +208,17 @@ export function createAuthRouter(pool: Pool, emailProvider: RecoveryEmailProvide
     const flow = cookie(req, FLOW_COOKIE);
     const credentialId = input.success && typeof input.data.response.id === 'string' ? input.data.response.id : '';
     if (!input.success || !flow || !credentialId) return res.status(400).json({ error: 'Sign-in could not be completed.' });
+    const attempt = await pool.query(
+      "UPDATE auth_challenges SET attempt_count=attempt_count+1 WHERE flow_token_hash=$1 AND purpose='PASSKEY_AUTHENTICATION' AND consumed_at IS NULL AND expires_at>NOW() AND attempt_count<5 RETURNING id",
+      [sha(flow)],
+    );
+    if (!attempt.rowCount) return res.status(400).json({ error: 'Sign-in expired or too many attempts. Try again.' });
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       const challenge = await client.query(
-        "SELECT id,challenge_hash FROM auth_challenges WHERE flow_token_hash=$1 AND purpose='PASSKEY_AUTHENTICATION' AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE",
-        [sha(flow)],
+        "SELECT id,challenge_hash FROM auth_challenges WHERE id=$1 AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE",
+        [attempt.rows[0].id],
       );
       if (!challenge.rowCount) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Sign-in expired. Try again.' }); }
       const found = await client.query(
@@ -265,12 +275,17 @@ export function createAuthRouter(pool: Pool, emailProvider: RecoveryEmailProvide
     const flow = cookie(req, FLOW_COOKIE);
     const session = res.locals.authSession as { userId: string };
     if (!input.success || !flow) return res.status(400).json({ error: 'Passkey registration expired.' });
+    const attempt = await pool.query(
+      "UPDATE auth_challenges SET attempt_count=attempt_count+1 WHERE flow_token_hash=$1 AND user_id=$2 AND purpose='PASSKEY_REGISTRATION' AND consumed_at IS NULL AND expires_at>NOW() AND attempt_count<5 RETURNING id",
+      [sha(flow), session.userId],
+    );
+    if (!attempt.rowCount) return res.status(400).json({ error: 'Passkey registration expired or too many attempts.' });
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       const challenge = await client.query(
-        "SELECT id,challenge_hash FROM auth_challenges WHERE flow_token_hash=$1 AND user_id=$2 AND purpose='PASSKEY_REGISTRATION' AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE",
-        [sha(flow), session.userId],
+        "SELECT id,challenge_hash FROM auth_challenges WHERE id=$1 AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE",
+        [attempt.rows[0].id],
       );
       if (!challenge.rowCount) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Passkey registration expired.' }); }
       await saveCredential(client, session.userId, input.data.response, challenge.rows[0].challenge_hash, config);
@@ -330,10 +345,15 @@ export function createAuthRouter(pool: Pool, emailProvider: RecoveryEmailProvide
   router.post('/recovery/verify-email', async (req, res, next) => {
     const input = recoveryVerifySchema.safeParse(req.body);
     if (!input.success) return res.status(400).json({ error: 'Recovery link is invalid or expired.' });
+    const attempt = await pool.query(
+      "UPDATE auth_challenges SET attempt_count=attempt_count+1 WHERE challenge_hash=$1 AND purpose='RECOVERY_EMAIL_VERIFICATION' AND consumed_at IS NULL AND expires_at>NOW() AND attempt_count<5 RETURNING id",
+      [sha(input.data.token)],
+    );
+    if (!attempt.rowCount) return res.status(400).json({ error: 'Recovery link is invalid or expired.' });
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const found = await client.query("SELECT id,user_id FROM auth_challenges WHERE challenge_hash=$1 AND purpose='RECOVERY_EMAIL_VERIFICATION' AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE", [sha(input.data.token)]);
+      const found = await client.query("SELECT id,user_id FROM auth_challenges WHERE id=$1 AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE", [attempt.rows[0].id]);
       if (!found.rowCount) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Recovery link is invalid or expired.' }); }
       const userId = found.rows[0].user_id as string;
       const options = await makeRegistrationOptions(pool, userId, config);
@@ -351,10 +371,15 @@ export function createAuthRouter(pool: Pool, emailProvider: RecoveryEmailProvide
     const input = responseSchema.safeParse(req.body);
     const flow = cookie(req, FLOW_COOKIE);
     if (!input.success || !flow) return res.status(400).json({ error: 'Recovery session expired. Start again.' });
+    const attempt = await pool.query(
+      "UPDATE auth_challenges SET attempt_count=attempt_count+1 WHERE flow_token_hash=$1 AND purpose='RECOVERY_PASSKEY_REGISTRATION' AND consumed_at IS NULL AND expires_at>NOW() AND attempt_count<5 RETURNING id",
+      [sha(flow)],
+    );
+    if (!attempt.rowCount) return res.status(400).json({ error: 'Recovery session expired or too many attempts. Start again.' });
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const challenge = await client.query("SELECT id,user_id,challenge_hash FROM auth_challenges WHERE flow_token_hash=$1 AND purpose='RECOVERY_PASSKEY_REGISTRATION' AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE", [sha(flow)]);
+      const challenge = await client.query("SELECT id,user_id,challenge_hash FROM auth_challenges WHERE id=$1 AND consumed_at IS NULL AND expires_at>NOW() FOR UPDATE", [attempt.rows[0].id]);
       if (!challenge.rowCount) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Recovery session expired. Start again.' }); }
       const userId = challenge.rows[0].user_id as string;
       await saveCredential(client, userId, input.data.response, challenge.rows[0].challenge_hash, config);
