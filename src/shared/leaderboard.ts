@@ -1,4 +1,4 @@
-export type TeamPlayer = { id: string; name: string };
+export type TeamPlayer = { id: string; name: string; memberCode?: string };
 export type TeamRecord = { id: number; players: TeamPlayer[] };
 export type RotationLeaderboardGame = { teamAId: number; teamBId: number; outcome: 'TEAM_A_WIN' | 'TEAM_B_WIN' | 'DRAW' };
 export type CompletedMatch = {
@@ -20,7 +20,7 @@ export function buildCommunityLeaderboard(matches: CompletedMatch[]): Leaderboar
   const stats = new Map<string, { memberId: string; name: string; wins: number; losses: number; draws: number; matchesPlayed: number }>();
   const apply = (team: TeamRecord, outcome: 'WIN' | 'LOSS' | 'DRAW') => {
     for (const player of team.players) {
-      const current = stats.get(player.id) || { memberId: player.id, name: player.name, wins: 0, losses: 0, draws: 0, matchesPlayed: 0 };
+      const current = stats.get(player.id) || { memberId: player.id, name: player.name, memberCode: player.memberCode, wins: 0, losses: 0, draws: 0, matchesPlayed: 0 };
       current.matchesPlayed += 1;
       if (outcome === 'WIN') current.wins += 1;
       if (outcome === 'LOSS') current.losses += 1;
