@@ -20,17 +20,17 @@ const responseSchema = z.object({ response: z.record(z.unknown()) });
 const recoveryVerifySchema = z.object({ token: z.string().min(32).max(200) });
 
 function sha(value: string): string { return createHash('sha256').update(value).digest('hex'); }
-function equalHex(a: string, b: string): boolean {
+export function equalHex(a: string, b: string): boolean {
   if (!/^(?:[a-f0-9]{2})+$/i.test(a) || !/^(?:[a-f0-9]{2})+$/i.test(b) || a.length !== b.length) return false;
   return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
 function token(bytes = 32): string { return randomBytes(bytes).toString('base64url'); }
 function codeFor(userId: string): string { return 'MSR-' + userId + '.' + token(32); }
-function parseCode(code: string): { userId: string; secret: string } | null {
+export function parseCode(code: string): { userId: string; secret: string } | null {
   const match = /^MSR-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([A-Za-z0-9_-]{40,60})$/i.exec(code);
   return match ? { userId: match[1], secret: match[2] } : null;
 }
-function recoveryHash(secret: string, salt: string): string { return scryptSync(secret, salt, 64).toString('hex'); }
+export function recoveryHash(secret: string, salt: string): string { return scryptSync(secret, salt, 64).toString('hex'); }
 function cookie(req: Request, name: string): string | null {
   for (const item of (req.headers.cookie || '').split(';')) {
     const [key, ...value] = item.trim().split('=');
