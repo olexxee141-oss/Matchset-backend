@@ -30,7 +30,7 @@ Community owners can promote roster members to Admin. Admins receive a private a
 Before deploying the new API, apply [migration 001](docs/migrations/001_admin_tournament_grouping.sql) and [migration 002](docs/migrations/002_winner_stays_rotation.sql) to the existing Neon database, in order. The API never runs production DDL automatically. Migration 002 is additive and leaves all existing matches untouched.
 
 ## Winner-stays match rotation
-New community matches start with Set 1 vs Set 2. A win keeps the winning team on the pitch and moves the losing team to the back of the queue; a draw moves both teams to the back and brings in the next two. Every game is recorded, including draws. The organiser can undo the latest result. Rotation state and game history are stored in the `community_matches.rotation_state` JSONB column.
+New community matches start with Set 1 vs Set 2. A win keeps the winning team on the pitch and moves the losing team to the back of the queue; a draw moves both teams to the back and brings in the next two. Every game is recorded, including draws. Organisers configure a 1–5 goal target and a 1–60 minute timer per rotation game. Goals record the scoring team, scorer and optional assister; reaching the target ends the game automatically. Timer expiry awards the win to the higher-scoring team or records a draw when tied. Timer timestamps, goal events, scores and queue state are stored together in `community_matches.rotation_state` JSONB. Organisers can pause/resume the timer and undo the latest completed game.
 
 ## Local development
 ```bash
