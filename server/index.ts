@@ -8,6 +8,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { z } from 'zod';
 import { distributePlayers } from '../src/shared/distribute.js';
 import { buildCommunityLeaderboard } from '../src/shared/leaderboard.js';
+import { createRotationState, recordRotationResult, undoRotationResult, type RotationOutcome, type RotationState } from '../src/shared/rotation.js';
 
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config({ path: existsSync('.env') ? '.env' : '.env.local' });
@@ -63,6 +64,11 @@ const resultSchema = z.object({
   resultToken: z.string().min(20),
   winningTeamId: z.number().int().positive(),
 });
+const rotationResultSchema = z.object({
+  resultToken: z.string().min(20),
+  outcome: z.enum(['TEAM_A_WIN', 'TEAM_B_WIN', 'DRAW']),
+});
+const rotationUndoSchema = z.object({ resultToken: z.string().min(20) });
 
 const adminRoleSchema = z.object({ ownerToken: z.string().min(20) });
 const tournamentGroupsSchema = z.object({
@@ -280,12 +286,12 @@ app.get('/api/communities/:slug', async (req, res, next) => {
     const community = found.rows[0];
     const [membersResult, matchesResult, leaderboardResult, tournaments] = await Promise.all([
       pool.query("SELECT id, display_name AS name, joined_at, role FROM community_members WHERE community_id=$1 ORDER BY display_name", [community.id]),
-      pool.query('SELECT id, title, teams, winning_team_id, created_at, completed_at FROM community_matches WHERE community_id=$1 ORDER BY created_at DESC LIMIT 100', [community.id]),
-      pool.query('SELECT teams, winning_team_id FROM community_matches WHERE community_id=$1 AND completed_at IS NOT NULL', [community.id]),
+      pool.query('SELECT id, title, teams, winning_team_id, rotation_state, created_at, completed_at FROM community_matches WHERE community_id=$1 ORDER BY created_at DESC LIMIT 100', [community.id]),
+      pool.query('SELECT teams, winning_team_id, rotation_state FROM community_matches WHERE community_id=$1 AND (completed_at IS NOT NULL OR rotation_state IS NOT NULL)', [community.id]),
       readTournaments(community.id),
     ]);
     const matches = matchesResult.rows.map((row) => ({
-      id: row.id, title: row.title, teams: row.teams, winningTeamId: row.winning_team_id,
+      id: row.id, title: row.title, teams: row.teams, winningTeamId: row.winning_team_id, rotationState: row.rotation_state,
       createdAt: row.created_at, completedAt: row.completed_at,
     }));
     res.json({
@@ -433,8 +439,8 @@ app.post('/api/communities/:slug/matches', async (req, res, next) => {
     const matchId = randomUUID();
     const resultToken = randomBytes(32).toString('base64url');
     const result = await pool.query(
-      'INSERT INTO community_matches (id, community_id, title, teams, created_by_member_id, result_token_hash) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, title, teams, winning_team_id, created_at, completed_at',
-      [matchId, community.rows[0].id, input.title, JSON.stringify(teams), input.createdByMemberId, hashToken(resultToken)],
+      'INSERT INTO community_matches (id, community_id, title, teams, created_by_member_id, result_token_hash, rotation_state) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, title, teams, winning_team_id, rotation_state, created_at, completed_at',
+      [matchId, community.rows[0].id, input.title, JSON.stringify(teams), input.createdByMemberId, hashToken(resultToken), JSON.stringify(createRotationState(teams.map((team) => team.id)))],
     );
     res.status(201).json({ match: result.rows[0], resultToken });
   } catch (error) { next(error); }
@@ -449,6 +455,7 @@ app.post('/api/communities/:slug/matches/:matchId/result', async (req, res, next
     if (!found.rowCount) return res.status(404).json({ error: 'Match not found.' });
     const match = found.rows[0];
     if (!tokenMatches(input.resultToken, match.result_token_hash)) return res.status(403).json({ error: 'Only the match organiser can record its result.' });
+    if (match.rotation_state) return res.status(409).json({ error: 'Use the rotation result action for this match.' });
     const teams = match.teams as Array<{ id: number }>;
     if (!teams.some((team) => team.id === input.winningTeamId)) return res.status(400).json({ error: 'Select a valid winning team.' });
     if (match.winning_team_id !== null) return res.status(409).json({ error: 'This match result has already been recorded.' });
@@ -459,6 +466,64 @@ app.post('/api/communities/:slug/matches/:matchId/result', async (req, res, next
     if (!updated.rowCount) return res.status(409).json({ error: 'This match result has already been recorded.' });
     res.json({ match: updated.rows[0] });
   } catch (error) { next(error); }
+});
+
+app.post('/api/communities/:slug/matches/:matchId/rotation/result', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const input = rotationResultSchema.parse(req.body);
+    const community = await client.query('SELECT id FROM communities WHERE slug=$1', [req.params.slug]);
+    if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
+    await client.query('BEGIN');
+    const found = await client.query(
+      'SELECT * FROM community_matches WHERE id=$1 AND community_id=$2 FOR UPDATE',
+      [req.params.matchId, community.rows[0].id],
+    );
+    if (!found.rowCount) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Match not found.' }); }
+    const match = found.rows[0];
+    if (!tokenMatches(input.resultToken, match.result_token_hash)) { await client.query('ROLLBACK'); return res.status(403).json({ error: 'Only the match organiser can record its result.' }); }
+    if (!match.rotation_state) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'This match does not have a rotation session.' }); }
+    const nextState = recordRotationResult(match.rotation_state as RotationState, input.outcome as RotationOutcome);
+    const updated = await client.query(
+      'UPDATE community_matches SET rotation_state=$1 WHERE id=$2 RETURNING id, title, teams, winning_team_id, rotation_state, created_at, completed_at',
+      [JSON.stringify(nextState), match.id],
+    );
+    await client.query('COMMIT');
+    res.json({ match: updated.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    if (error instanceof Error && (error.message.includes('not active') || error.message.includes('Two active'))) return res.status(409).json({ error: error.message });
+    next(error);
+  } finally { client.release(); }
+});
+
+app.post('/api/communities/:slug/matches/:matchId/rotation/undo', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const input = rotationUndoSchema.parse(req.body);
+    const community = await client.query('SELECT id FROM communities WHERE slug=$1', [req.params.slug]);
+    if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
+    await client.query('BEGIN');
+    const found = await client.query(
+      'SELECT * FROM community_matches WHERE id=$1 AND community_id=$2 FOR UPDATE',
+      [req.params.matchId, community.rows[0].id],
+    );
+    if (!found.rowCount) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Match not found.' }); }
+    const match = found.rows[0];
+    if (!tokenMatches(input.resultToken, match.result_token_hash)) { await client.query('ROLLBACK'); return res.status(403).json({ error: 'Only the match organiser can undo results.' }); }
+    if (!match.rotation_state) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'This match does not have a rotation session.' }); }
+    const nextState = undoRotationResult(match.rotation_state as RotationState);
+    const updated = await client.query(
+      'UPDATE community_matches SET rotation_state=$1 WHERE id=$2 RETURNING id, title, teams, winning_team_id, rotation_state, created_at, completed_at',
+      [JSON.stringify(nextState), match.id],
+    );
+    await client.query('COMMIT');
+    res.json({ match: updated.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    if (error instanceof Error && error.message.includes('no result')) return res.status(409).json({ error: error.message });
+    next(error);
+  } finally { client.release(); }
 });
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

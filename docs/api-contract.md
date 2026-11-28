@@ -21,11 +21,14 @@ All routes are prefixed with `/api`. Community read requests may include:
 - `POST /api/communities/:slug/tournaments` body `{ name, groups, ownerToken? }` → `{ tournaments }`. Owner or admin only. Each group contains teams; each team contains a name and community member IDs. Admin requests authenticate with `X-Community-Admin-Token`.
 - `PUT /api/communities/:slug/tournaments/:tournamentId/groups` body `{ groups, ownerToken? }` → `{ tournaments }`. Owner or admin only. Replaces group assignments atomically.
 - `POST /api/communities/:slug/matches` body `{ title, memberIds, playersPerTeam, createdByMemberId, ownerToken }` → `{ match, resultToken }`. Owner-only.
-- `POST /api/communities/:slug/matches/:matchId/result` body `{ resultToken, winningTeamId }` → `{ match }`.
+- `POST /api/communities/:slug/matches/:matchId/result` body `{ resultToken, winningTeamId }` → `{ match }` (legacy result endpoint).
+- New community matches initialize a persistent winner-stays rotation in `match.rotationState`: `activeTeamIds`, `waitingTeamIds`, `games`, and `status`.
+- `POST /api/communities/:slug/matches/:matchId/rotation/result` body `{ resultToken, outcome: TEAM_A_WIN | TEAM_B_WIN | DRAW }` → updated `{ match }`. Team A and Team B refer to the active lineup order shown in the current rotation state.
+- `POST /api/communities/:slug/matches/:matchId/rotation/undo` body `{ resultToken }` → updated `{ match }`. Removes only the latest game and restores its exact previous queue and active teams.
 
 Role changes are recorded in `community_role_audit`. Admins cannot manage the roster, appoint admins, create matches, record match results, or delete communities. Admin tokens are stored as hashes and are invalidated when an admin is demoted.
 
 Validation errors return 400; missing resources 404; failed authorization 403; conflicts 409. Errors use `{ error }` JSON.
 
 ## Database migration
-Apply `docs/migrations/001_admin_tournament_grouping.sql` to the existing Neon production database before deploying this API version. The migration is additive and preserves existing community data. The API deliberately does not execute DDL at startup.
+Apply `docs/migrations/001_admin_tournament_grouping.sql` and then `docs/migrations/002_winner_stays_rotation.sql` to the existing Neon production database before deploying this API version. Both migrations are additive and preserve existing community data. The API deliberately does not execute DDL at startup.
