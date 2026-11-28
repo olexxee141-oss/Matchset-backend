@@ -10,6 +10,7 @@ import { createRecoveryEmailProvider } from './email/recoveryEmailProvider.js';
 import { z } from 'zod';
 import { distributePlayers, distributeItems } from '../src/shared/distribute.js';
 import { buildCommunityLeaderboard } from '../src/shared/leaderboard.js';
+import { createMemberCode } from '../src/shared/memberCode.js';
 import { createRotationState, recordRotationGoal, recordRotationResult, undoRotationResult, pauseRotationTimer, resumeRotationTimer, expireRotationTimer, remainingTimeMs, type RotationOutcome, type RotationState } from '../src/shared/rotation.js';
 
 if (process.env.NODE_ENV !== 'production') {
@@ -277,7 +278,7 @@ app.post('/api/communities', async (req, res, next) => {
         'INSERT INTO communities (id, slug, name, owner_token_hash) VALUES ($1,$2,$3,$4) RETURNING id, slug, name, created_at',
         [communityId, slug, input.name, hashToken(ownerToken)],
       );
-      const memberCode = memberId.replace(/-/g, '').slice(0, 8).toUpperCase();
+      const memberCode = createMemberCode(memberId);
       const member = await client.query(
         'INSERT INTO community_members (id, community_id, display_name, normalized_name, member_code) VALUES ($1,$2,$3,$4,$5) RETURNING id, display_name, member_code',
         [memberId, communityId, memberName, normalizeName(memberName), memberCode],
@@ -325,10 +326,10 @@ app.post('/api/communities/:slug/members', async (req, res, next) => {
     if (!tokenMatches(input.ownerToken, community.rows[0].owner_token_hash)) return res.status(403).json({ error: 'Only the community creator can manage the roster.' });
     const name = input.name.trim();
     const memberId = randomUUID();
-    const memberCode = memberId.replace(/-/g, '').slice(0, 8).toUpperCase();
+    const memberCode = createMemberCode(memberId);
     const result = await pool.query(
-      'INSERT INTO community_members (id, community_id, display_name, normalized_name) VALUES ($1,$2,$3,$4) RETURNING id, display_name AS name, joined_at',
-      [randomUUID(), community.rows[0].id, name, normalizeName(name)],
+      'INSERT INTO community_members (id, community_id, display_name, normalized_name, member_code) VALUES ($1,$2,$3,$4,$5) RETURNING id, display_name AS name, member_code AS "memberCode", joined_at',
+      [memberId, community.rows[0].id, name, normalizeName(name), memberCode],
     );
     res.status(201).json({ member: result.rows[0] });
   } catch (error) { next(error); }
