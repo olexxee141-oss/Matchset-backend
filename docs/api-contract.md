@@ -20,11 +20,12 @@ All routes are prefixed with `/api`. Community read requests may include:
 - `DELETE /api/communities/:slug/members/:memberId/admin` body `{ ownerToken }` → `{ role: "MEMBER" }`. Owner-only; revokes the member's admin token immediately.
 - `POST /api/communities/:slug/tournaments` body `{ name, groups, ownerToken? }` → `{ tournaments }`. Owner or admin only. Each group contains teams; each team contains a name and community member IDs. Admin requests authenticate with `X-Community-Admin-Token`.
 - `PUT /api/communities/:slug/tournaments/:tournamentId/groups` body `{ groups, ownerToken? }` → `{ tournaments }`. Owner or admin only. Replaces group assignments atomically.
-- `POST /api/communities/:slug/matches` body `{ title, memberIds, playersPerTeam, createdByMemberId, ownerToken }` → `{ match, resultToken }`. Owner-only.
+- `POST /api/communities/:slug/matches` body `{ title, memberIds, playersPerTeam, createdByMemberId, ownerToken, goalsToWin?, durationMinutes? }` → `{ match, resultToken }`. Goal target defaults to 1 (range 1–5); each rotation game timer defaults to 10 minutes (range 1–60). Owner-only.
 - `POST /api/communities/:slug/matches/:matchId/result` body `{ resultToken, winningTeamId }` → `{ match }` (legacy result endpoint).
-- New community matches initialize a persistent winner-stays rotation in `match.rotationState`: `activeTeamIds`, `waitingTeamIds`, `games`, and `status`.
-- `POST /api/communities/:slug/matches/:matchId/rotation/result` body `{ resultToken, outcome: TEAM_A_WIN | TEAM_B_WIN | DRAW }` → updated `{ match }`. Team A and Team B refer to the active lineup order shown in the current rotation state.
-- `POST /api/communities/:slug/matches/:matchId/rotation/undo` body `{ resultToken }` → updated `{ match }`. Removes only the latest game and restores its exact previous queue and active teams.
+- New community matches initialize a persistent winner-stays rotation in `match.rotationState`: `activeTeamIds`, `waitingTeamIds`, `games`, `status`, goal target, per-game goal events/score and server-authoritative timer timestamps.
+- `POST /api/communities/:slug/matches/:matchId/rotation/goal` body `{ resultToken, teamId, scorerId, assisterId? }` → updated `{ match }`. Scorer and optional assister must belong to the active scoring team; self-assists are rejected. Reaching the goal target completes the game automatically.
+- `POST /api/communities/:slug/matches/:matchId/rotation/timer` body `{ resultToken, action: PAUSE | RESUME | TICK }` → updated `{ match }`. The server stores timer timestamps in rotation JSONB; `TICK` completes an expired game using score (or draw when tied).
+- `POST /api/communities/:slug/matches/:matchId/rotation/undo` body `{ resultToken }` → updated `{ match }`. Removes only the latest completed game and restores its pre-game lineup, score and timer.
 
 Role changes are recorded in `community_role_audit`. Admins cannot manage the roster, appoint admins, create matches, record match results, or delete communities. Admin tokens are stored as hashes and are invalidated when an admin is demoted.
 
