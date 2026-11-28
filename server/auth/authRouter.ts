@@ -46,12 +46,13 @@ function setCookie(res: Response, name: string, value: string, maxAge: number, s
 function clearCookie(res: Response, name: string, secure: boolean): void { setCookie(res, name, '', 0, secure); }
 
 function authConfig(env: NodeJS.ProcessEnv): AuthConfig {
-  const base = new URL(env.APP_BASE_URL || 'http://localhost:5173');
-  const origins = (env.WEBAUTHN_ORIGIN || env.FRONTEND_ORIGIN || base.origin).split(',').map((v) => v.trim()).filter(Boolean);
-  const rpId = env.WEBAUTHN_RP_ID || base.hostname;
+  const configuredFrontend = (env.WEBAUTHN_ORIGIN || env.FRONTEND_ORIGIN || '').split(',').map((v) => v.trim()).filter(Boolean);
+  const base = new URL(env.APP_BASE_URL || configuredFrontend[0] || 'http://localhost:5173');
+  const origins = configuredFrontend.length ? configuredFrontend : [base.origin];
+  const rpId = env.WEBAUTHN_RP_ID || new URL(origins[0]).hostname;
   if (!origins.length || origins.some((v) => new URL(v).origin !== v)) throw new Error('WEBAUTHN_ORIGIN must contain exact origins.');
-  if (env.NODE_ENV === 'production' && (base.protocol !== 'https:' || !env.WEBAUTHN_RP_ID || !env.WEBAUTHN_ORIGIN)) {
-    throw new Error('Production WebAuthn requires HTTPS APP_BASE_URL, WEBAUTHN_RP_ID and WEBAUTHN_ORIGIN.');
+  if (env.NODE_ENV === 'production' && (base.protocol !== 'https:' || origins.some((v) => new URL(v).protocol !== 'https:') || !origins.some((v) => new URL(v).hostname === rpId || new URL(v).hostname.endsWith('.' + rpId)))) {
+    throw new Error('Production WebAuthn requires HTTPS origins and an RP ID matching the frontend domain.');
   }
   return { rpName: env.WEBAUTHN_RP_NAME || 'MatchSet', rpId, origins, appBaseUrl: base.origin, secureCookies: env.NODE_ENV === 'production' };
 }
@@ -255,7 +256,8 @@ export function createAuthRouter(pool: Pool, emailProvider: RecoveryEmailProvide
       const csrfToken = token();
       await pool.query("UPDATE auth_sessions SET csrf_token_hash=$1,last_used_at=NOW() WHERE id=$2", [sha(csrfToken), session.id]);
       const passkeys = await pool.query("SELECT credential_id,device_type,backed_up,created_at,last_used_at FROM user_passkey_credentials WHERE user_id=$1 AND revoked_at IS NULL ORDER BY created_at", [session.userId]);
-      res.json({ userId: session.userId, csrfToken, passkeys: passkeys.rows });
+      const recovery = await pool.query("SELECT acknowledged_at FROM user_recovery_codes WHERE user_id=$1 AND consumed_at IS NULL AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1", [session.userId]);
+      res.json({ userId: session.userId, csrfToken, passkeys: passkeys.rows, recoveryCodeAcknowledged: Boolean(recovery.rows[0]?.acknowledged_at) });
     } catch (error) { next(error); }
   });
 
@@ -396,6 +398,22 @@ export function createAuthRouter(pool: Pool, emailProvider: RecoveryEmailProvide
       await client.query('ROLLBACK').catch(() => undefined);
       res.status(400).json({ error: 'Recovery could not be completed. Start again.' });
     } finally { client.release(); }
+  });
+
+  router.post('/recovery-code/acknowledge', requireSession, requireCsrf, async (req, res, next) => {
+    const input = z.object({ recoveryCode: z.string().min(30).max(180) }).safeParse(req.body);
+    if (!input.success) return res.status(400).json({ error: 'Recovery code acknowledgement failed.' });
+    try {
+      const session = res.locals.authSession as { userId: string };
+      const parts = parseCode(input.data.recoveryCode);
+      if (!parts || parts.userId !== session.userId) return res.status(400).json({ error: 'Recovery code acknowledgement failed.' });
+      const saved = await pool.query("SELECT id,code_salt,code_hash FROM user_recovery_codes WHERE user_id=$1 AND consumed_at IS NULL AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1", [session.userId]);
+      if (!saved.rowCount || !equalHex(recoveryHash(parts.secret, saved.rows[0].code_salt), saved.rows[0].code_hash)) {
+        return res.status(400).json({ error: 'Recovery code acknowledgement failed.' });
+      }
+      await pool.query("UPDATE user_recovery_codes SET acknowledged_at=COALESCE(acknowledged_at,NOW()) WHERE id=$1", [saved.rows[0].id]);
+      res.json({ acknowledged: true });
+    } catch (error) { next(error); }
   });
 
   router.post('/logout', requireSession, requireCsrf, async (_req, res, next) => {
