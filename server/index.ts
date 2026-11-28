@@ -455,6 +455,7 @@ app.post('/api/communities/:slug/matches/:matchId/result', async (req, res, next
     if (!found.rowCount) return res.status(404).json({ error: 'Match not found.' });
     const match = found.rows[0];
     if (!tokenMatches(input.resultToken, match.result_token_hash)) return res.status(403).json({ error: 'Only the match organiser can record its result.' });
+    if (match.rotation_state) return res.status(409).json({ error: 'Use the rotation result action for this match.' });
     const teams = match.teams as Array<{ id: number }>;
     if (!teams.some((team) => team.id === input.winningTeamId)) return res.status(400).json({ error: 'Select a valid winning team.' });
     if (match.winning_team_id !== null) return res.status(409).json({ error: 'This match result has already been recorded.' });
