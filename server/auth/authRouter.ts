@@ -95,7 +95,7 @@ async function saveCredential(client: PoolClient, userId: string, response: Reco
     [credential.id, userId, Buffer.from(credential.publicKey), credential.counter, credential.transports ?? [], info.credentialDeviceType, info.credentialBackedUp, info.aaguid ?? null],
   );
 }
-async function makeRegistrationOptions(pool: Pool, userId: string, config: AuthConfig): Promise<Record<string, unknown>> {
+async function makeRegistrationOptions(pool: Pool, userId: string, config: AuthConfig): Promise<Awaited<ReturnType<typeof generateRegistrationOptions>>> {
   const existing = await pool.query("SELECT credential_id,transports FROM user_passkey_credentials WHERE user_id=$1 AND revoked_at IS NULL", [userId]);
   return generateRegistrationOptions({
     rpName: config.rpName,
