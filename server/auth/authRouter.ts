@@ -333,7 +333,7 @@ export function createAuthRouter(pool: Pool, emailProvider: RecoveryEmailProvide
       const challengeId = randomUUID();
       await pool.query("INSERT INTO auth_challenges (id,user_id,challenge_hash,purpose,expires_at) VALUES ($1,$2,$3,'RECOVERY_EMAIL_VERIFICATION',NOW()+($4*INTERVAL '1 minute'))", [challengeId, parts.userId, sha(emailToken), RECOVERY_EMAIL_TTL]);
       const url = new URL('/recover/verify', config.appBaseUrl);
-      url.searchParams.set('token', emailToken);
+      url.hash = new URLSearchParams({ token: emailToken }).toString();
       try {
         await emailProvider.sendRecoveryVerificationEmail({ to: input.data.email, verificationUrl: url.toString(), expiresInMinutes: RECOVERY_EMAIL_TTL });
       } catch {
@@ -414,6 +414,30 @@ export function createAuthRouter(pool: Pool, emailProvider: RecoveryEmailProvide
       await pool.query("UPDATE user_recovery_codes SET acknowledged_at=COALESCE(acknowledged_at,NOW()) WHERE id=$1", [saved.rows[0].id]);
       res.json({ acknowledged: true });
     } catch (error) { next(error); }
+  });
+
+  router.post('/recovery-code/rotate', requireSession, requireCsrf, async (_req, res, next) => {
+    const client = await pool.connect();
+    try {
+      const session = res.locals.authSession as { userId: string };
+      await client.query('BEGIN');
+      const current = await client.query(
+        "SELECT id,acknowledged_at FROM user_recovery_codes WHERE user_id=$1 AND consumed_at IS NULL AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+        [session.userId],
+      );
+      if (!current.rowCount) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'No active recovery code was found.' }); }
+      if (current.rows[0].acknowledged_at) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'A saved recovery code can only be rotated after a fresh passkey verification.' });
+      }
+      await client.query("UPDATE user_recovery_codes SET revoked_at=NOW() WHERE id=$1", [current.rows[0].id]);
+      const recoveryCode = await saveNewRecoveryCode(client, session.userId);
+      await client.query('COMMIT');
+      res.json({ recoveryCode });
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      next(error);
+    } finally { client.release(); }
   });
 
   router.post('/logout', requireSession, requireCsrf, async (_req, res, next) => {
