@@ -41,6 +41,9 @@ The backend must support safe replay of queued organiser operations before the f
 
 The existing `rotation_state` JSONB is the current match-state store, but it must not be assumed to provide durable request idempotency by itself. Any new persistence design must be additive, tested on a disposable Neon branch, and approved before production migration. The API must remain free of automatic DDL at startup. Offline results remain provisional until accepted by the server; first release assumes one controlling organiser device per match session.
 
+## Recovery email provider
+See [docs/recovery-email-provider.md](docs/recovery-email-provider.md) for Resend configuration, privacy boundaries, and delivery failure behavior. The provider adapter is implemented; recovery endpoints and production email configuration are not enabled yet.
+
 ## Local development
 ```bash
 npm install
