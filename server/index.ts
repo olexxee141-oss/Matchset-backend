@@ -6,7 +6,7 @@ import cors from 'cors';
 import { Pool } from 'pg';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { distributePlayers } from '../src/shared/distribute.js';
+import { distributePlayers, distributeItems } from '../src/shared/distribute.js';
 import { buildCommunityLeaderboard } from '../src/shared/leaderboard.js';
 import { createRotationState, recordRotationGoal, recordRotationResult, undoRotationResult, pauseRotationTimer, resumeRotationTimer, expireRotationTimer, remainingTimeMs, type RotationOutcome, type RotationState } from '../src/shared/rotation.js';
 
@@ -317,10 +317,9 @@ app.post('/api/communities/:slug/members', async (req, res, next) => {
     if (!tokenMatches(input.ownerToken, community.rows[0].owner_token_hash)) return res.status(403).json({ error: 'Only the community creator can manage the roster.' });
     const name = input.name.trim();
     const result = await pool.query(
-      'INSERT INTO community_members (id, community_id, display_name, normalized_name) VALUES ($1,$2,$3,$4) ON CONFLICT (community_id, normalized_name) DO NOTHING RETURNING id, display_name AS name, joined_at',
+      'INSERT INTO community_members (id, community_id, display_name, normalized_name) VALUES ($1,$2,$3,$4) RETURNING id, display_name AS name, joined_at',
       [randomUUID(), community.rows[0].id, name, normalizeName(name)],
     );
-    if (!result.rowCount) return res.status(409).json({ error: 'That name is already in this community. Ask the member to share their member name or choose a distinct name.' });
     res.status(201).json({ member: result.rows[0] });
   } catch (error) { next(error); }
 });
@@ -429,16 +428,10 @@ app.post('/api/communities/:slug/matches', async (req, res, next) => {
     if (membersResult.rowCount !== input.memberIds.length) return res.status(400).json({ error: 'Every selected player must belong to this community.' });
     if (!membersResult.rows.some((member: any) => member.id === input.createdByMemberId)) return res.status(400).json({ error: 'The match organiser must be a member of this community.' });
     if (Math.ceil(membersResult.rowCount / input.playersPerTeam) < 2) return res.status(400).json({ error: 'Add enough players to create at least two teams.' });
-    const names = membersResult.rows.map((member) => member.display_name);
-    const distributed = distributePlayers(names, input.playersPerTeam);
-    const membersByName = new Map(membersResult.rows.map((member) => [normalizeName(member.display_name), member]));
+    const distributed = distributeItems(membersResult.rows as Array<{ id: string; display_name: string }>, input.playersPerTeam);
     const teams = distributed.map((team) => ({
       id: team.id,
-      players: team.players.map((name) => {
-        const member = membersByName.get(normalizeName(name));
-        if (!member) throw new Error('Could not resolve a team member.');
-        return { id: member.id, name: member.display_name };
-      }),
+      players: team.players.map((member) => ({ id: member.id, name: member.display_name })),
     }));
     const matchId = randomUUID();
     const resultToken = randomBytes(32).toString('base64url');
@@ -599,7 +592,7 @@ app.post('/api/communities/:slug/matches/:matchId/rotation/undo', async (req, re
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (error instanceof z.ZodError) return res.status(400).json({ error: error.issues[0]?.message || 'Invalid input.' });
-  if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') return res.status(409).json({ error: 'That name is already registered in this community.' });
+  if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') return res.status(409).json({ error: 'A conflicting record already exists.' });
   console.error(error);
   return res.status(500).json({ error: 'Something went wrong. Please try again.' });
 });
