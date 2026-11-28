@@ -26,4 +26,4 @@ Do not use a Resend test sender for production. The sender domain must be verifi
 
 ## Implementation boundary
 
-This change adds only the provider interface, Resend adapter, configuration contract, and tests. It does not create recovery endpoints, generate recovery tokens, or persist email addresses. The authentication flow must generate the token, persist only its hash, construct an HTTPS link using the configured frontend origin, and consume the challenge only after successful verification.
+The backend now exposes the recovery start and email-verification endpoints. The flow requires a valid one-time recovery code before sending email, stores only a hash of the one-time link, and requires a new passkey after email verification. The recipient address is passed directly to the provider and is not persisted by MatchSet. Recovery completion consumes the old recovery code, revokes existing sessions, and issues a replacement code. The frontend recovery screens and production provider configuration are still pending.
