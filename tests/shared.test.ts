@@ -24,3 +24,23 @@ describe('buildCommunityLeaderboard', () => {
     expect(rows.find((row) => row.memberId === 'a')?.losses).toBe(1);
   });
 });
+
+describe('rotation leaderboard', () => {
+  it('counts wins, losses and draws from every recorded rotation game', () => {
+    const rows = buildCommunityLeaderboard([{
+      winning_team_id: null,
+      teams: [
+        { id: 1, players: [{ id: 'a', name: 'A' }] },
+        { id: 2, players: [{ id: 'b', name: 'B' }] },
+        { id: 3, players: [{ id: 'c', name: 'C' }] },
+      ],
+      rotation_state: { games: [
+        { teamAId: 1, teamBId: 2, outcome: 'TEAM_A_WIN' },
+        { teamAId: 1, teamBId: 3, outcome: 'DRAW' },
+      ] },
+    }]);
+    expect(rows.find((row) => row.memberId === 'a')).toMatchObject({ wins: 1, losses: 0, draws: 1, matchesPlayed: 2 });
+    expect(rows.find((row) => row.memberId === 'b')).toMatchObject({ wins: 0, losses: 1, draws: 0, matchesPlayed: 1 });
+    expect(rows.find((row) => row.memberId === 'c')).toMatchObject({ wins: 0, losses: 0, draws: 1, matchesPlayed: 1 });
+  });
+});
