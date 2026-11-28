@@ -39,7 +39,7 @@ function cookie(req: Request, name: string): string | null {
   return null;
 }
 function setCookie(res: Response, name: string, value: string, maxAge: number, secure: boolean): void {
-  const parts = [name + '=' + encodeURIComponent(value), 'Path=/api/auth', 'HttpOnly', 'SameSite=Lax', 'Max-Age=' + maxAge];
+  const parts = [name + '=' + encodeURIComponent(value), 'Path=/api', 'HttpOnly', 'SameSite=Lax', 'Max-Age=' + maxAge];
   if (secure) parts.push('Secure');
   res.append('Set-Cookie', parts.join('; '));
 }
