@@ -8,7 +8,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { z } from 'zod';
 import { distributePlayers } from '../src/shared/distribute.js';
 import { buildCommunityLeaderboard } from '../src/shared/leaderboard.js';
-import { createRotationState, recordRotationResult, undoRotationResult, type RotationOutcome, type RotationState } from '../src/shared/rotation.js';
+import { createRotationState, recordRotationGoal, recordRotationResult, undoRotationResult, pauseRotationTimer, resumeRotationTimer, expireRotationTimer, remainingTimeMs, type RotationOutcome, type RotationState } from '../src/shared/rotation.js';
 
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config({ path: existsSync('.env') ? '.env' : '.env.local' });
@@ -59,7 +59,11 @@ const matchSchema = z.object({
   playersPerTeam: z.number().int().min(2).max(20),
   createdByMemberId: z.string().uuid(),
   ownerToken: z.string().min(20),
+  goalsToWin: z.number().int().min(1).max(5).default(1),
+  durationMinutes: z.number().int().min(1).max(60).default(10),
 });
+const goalSchema = z.object({ resultToken: z.string().min(20), teamId: z.number().int().positive(), scorerId: z.string().uuid(), assisterId: z.string().uuid().nullable().optional() });
+const timerSchema = z.object({ resultToken: z.string().min(20), action: z.enum(['PAUSE', 'RESUME', 'TICK']) });
 const resultSchema = z.object({
   resultToken: z.string().min(20),
   winningTeamId: z.number().int().positive(),
@@ -440,7 +444,7 @@ app.post('/api/communities/:slug/matches', async (req, res, next) => {
     const resultToken = randomBytes(32).toString('base64url');
     const result = await pool.query(
       'INSERT INTO community_matches (id, community_id, title, teams, created_by_member_id, result_token_hash, rotation_state) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, title, teams, winning_team_id, rotation_state, created_at, completed_at',
-      [matchId, community.rows[0].id, input.title, JSON.stringify(teams), input.createdByMemberId, hashToken(resultToken), JSON.stringify(createRotationState(teams.map((team) => team.id)))],
+      [matchId, community.rows[0].id, input.title, JSON.stringify(teams), input.createdByMemberId, hashToken(resultToken), JSON.stringify(createRotationState(teams.map((team) => team.id), { goalsToWin: input.goalsToWin, durationSeconds: input.durationMinutes * 60 }))],
     );
     res.status(201).json({ match: result.rows[0], resultToken });
   } catch (error) { next(error); }
@@ -483,6 +487,7 @@ app.post('/api/communities/:slug/matches/:matchId/rotation/result', async (req, 
     const match = found.rows[0];
     if (!tokenMatches(input.resultToken, match.result_token_hash)) { await client.query('ROLLBACK'); return res.status(403).json({ error: 'Only the match organiser can record its result.' }); }
     if (!match.rotation_state) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'This match does not have a rotation session.' }); }
+    if (input.outcome !== 'DRAW') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Wins are determined by the goal target or timer. Only an organiser-declared draw is available here.' }); }
     const nextState = recordRotationResult(match.rotation_state as RotationState, input.outcome as RotationOutcome);
     const updated = await client.query(
       'UPDATE community_matches SET rotation_state=$1 WHERE id=$2 RETURNING id, title, teams, winning_team_id, rotation_state, created_at, completed_at',
@@ -493,6 +498,72 @@ app.post('/api/communities/:slug/matches/:matchId/rotation/result', async (req, 
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
     if (error instanceof Error && (error.message.includes('not active') || error.message.includes('Two active'))) return res.status(409).json({ error: error.message });
+    next(error);
+  } finally { client.release(); }
+});
+
+app.post('/api/communities/:slug/matches/:matchId/rotation/goal', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const input = goalSchema.parse(req.body);
+    const community = await client.query('SELECT id FROM communities WHERE slug=$1', [req.params.slug]);
+    if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
+    await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM community_matches WHERE id=$1 AND community_id=$2 FOR UPDATE', [req.params.matchId, community.rows[0].id]);
+    if (!found.rowCount) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Match not found.' }); }
+    const match = found.rows[0];
+    if (!tokenMatches(input.resultToken, match.result_token_hash)) { await client.query('ROLLBACK'); return res.status(403).json({ error: 'Only the match organiser can record goals.' }); }
+    if (!match.rotation_state) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'This match does not have a rotation session.' }); }
+    const state = match.rotation_state as RotationState;
+    if (remainingTimeMs(state) <= 0) {
+      const expired = expireRotationTimer(state);
+      const updated = await client.query('UPDATE community_matches SET rotation_state=$1 WHERE id=$2 RETURNING id,title,teams,winning_team_id,rotation_state,created_at,completed_at', [JSON.stringify(expired), match.id]);
+      await client.query('COMMIT');
+      return res.json({ match: updated.rows[0], timerExpired: true });
+    }
+    const team = (match.teams as Array<{ id: number; players: Array<{ id: string; name: string }> }>).find((item) => item.id === input.teamId);
+    if (!team || !state.activeTeamIds.includes(input.teamId)) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Goals can only be assigned to one of the two active teams.' }); }
+    const scorer = team.players.find((player) => player.id === input.scorerId);
+    if (!scorer) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'The scorer must belong to the scoring team.' }); }
+    const assister = input.assisterId ? team.players.find((player) => player.id === input.assisterId) : undefined;
+    if (input.assisterId && !assister) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'The assister must belong to the scoring team.' }); }
+    if (input.assisterId === input.scorerId) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'A player cannot assist their own goal.' }); }
+    const nextState = recordRotationGoal(state, {
+      teamId: input.teamId, scorerId: scorer.id, scorerName: scorer.name,
+      assisterId: assister?.id ?? null, assisterName: assister?.name ?? null,
+    });
+    const updated = await client.query('UPDATE community_matches SET rotation_state=$1 WHERE id=$2 RETURNING id,title,teams,winning_team_id,rotation_state,created_at,completed_at', [JSON.stringify(nextState), match.id]);
+    await client.query('COMMIT');
+    res.json({ match: updated.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    if (error instanceof Error && (error.message.includes('not active') || error.message.includes('active teams') || error.message.includes('assist'))) return res.status(409).json({ error: error.message });
+    next(error);
+  } finally { client.release(); }
+});
+
+app.post('/api/communities/:slug/matches/:matchId/rotation/timer', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const input = timerSchema.parse(req.body);
+    const community = await client.query('SELECT id FROM communities WHERE slug=$1', [req.params.slug]);
+    if (!community.rowCount) return res.status(404).json({ error: 'Community not found.' });
+    await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM community_matches WHERE id=$1 AND community_id=$2 FOR UPDATE', [req.params.matchId, community.rows[0].id]);
+    if (!found.rowCount) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Match not found.' }); }
+    const match = found.rows[0];
+    if (!tokenMatches(input.resultToken, match.result_token_hash)) { await client.query('ROLLBACK'); return res.status(403).json({ error: 'Only the match organiser can control its timer.' }); }
+    if (!match.rotation_state) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'This match does not have a rotation session.' }); }
+    let nextState = match.rotation_state as RotationState;
+    if (input.action === 'PAUSE') nextState = pauseRotationTimer(nextState);
+    if (input.action === 'RESUME') nextState = resumeRotationTimer(nextState);
+    if (input.action === 'TICK') nextState = expireRotationTimer(nextState);
+    const updated = await client.query('UPDATE community_matches SET rotation_state=$1 WHERE id=$2 RETURNING id,title,teams,winning_team_id,rotation_state,created_at,completed_at', [JSON.stringify(nextState), match.id]);
+    await client.query('COMMIT');
+    res.json({ match: updated.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    if (error instanceof Error && error.message.includes('not active')) return res.status(409).json({ error: error.message });
     next(error);
   } finally { client.release(); }
 });
