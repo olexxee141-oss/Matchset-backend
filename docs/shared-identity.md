@@ -1,6 +1,6 @@
 # Shared identity and authentication foundation
 
-Status: approved product direction; implementation not yet enabled.
+Status: backend authentication API and frontend account screens are merged; production identity migrations 003 and 004 are applied. Runtime rollout is pending backend deployment and transactional email configuration.
 
 ## Decision
 
@@ -80,9 +80,10 @@ Inspect actual production schema and migration history; all route/controller/ser
 - Preserve all existing community, roster, match, tournament, rotation, goal and audit data.
 - CI must cover duplicate names, cross-community membership, cross-community role isolation, unclaimed membership, claim replay/expiry, passkey challenge validation, recovery-code replay/expiry, session revocation, and legacy-token compatibility.
 
-## Open implementation gates
+## Remaining rollout gates
 
-- Select and configure a transactional email provider for one-time recovery delivery; do not store its recipient address in the application database.
-- Confirm frontend and API hostnames so cookie domain/SameSite/Secure settings and WebAuthn RP ID/origin are correct.
-- Confirm current schema/table names and legacy token semantics before migration.
+- Deploy the merged backend authentication code to Render and verify its health and auth routes.
+- Configure Resend in Render with `AUTH_EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, `AUTH_EMAIL_FROM` on a verified sender domain, and `APP_BASE_URL=https://matchset-teal.vercel.app`. Never paste the API key into chat or source control.
+- Confirm the frontend production deployment includes the merged account UI.
+- Test passkey creation, sign-in, multiple passkeys, logout, recovery email delivery, recovery link, new passkey registration, session revocation, and replacement recovery code on real browsers/devices.
 - Define owner/community-governance recovery for the rare case where all passkeys and the recovery code are lost. Do not let a public invite link become an ownership recovery mechanism.
