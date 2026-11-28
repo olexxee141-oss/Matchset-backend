@@ -64,6 +64,11 @@ const resultSchema = z.object({
   resultToken: z.string().min(20),
   winningTeamId: z.number().int().positive(),
 });
+const rotationResultSchema = z.object({
+  resultToken: z.string().min(20),
+  outcome: z.enum(['TEAM_A_WIN', 'TEAM_B_WIN', 'DRAW']),
+});
+const rotationUndoSchema = z.object({ resultToken: z.string().min(20) });
 
 const adminRoleSchema = z.object({ ownerToken: z.string().min(20) });
 const tournamentGroupsSchema = z.object({
